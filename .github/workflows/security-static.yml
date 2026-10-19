@@ -1,0 +1,141 @@
+# Análisis estático de seguridad: Semgrep, Gitleaks, Checkov y Trivy en paralelo.
+# Vive en el repo central "security-pipelines" y se exige en toda la organización
+# mediante un ruleset ("Require workflows to pass before merging").
+#
+# Modo evaluación vs. bloqueo: controlado por la variable de organización
+# SECURITY_BLOCKING. Si no existe o es distinta de "true", los hallazgos se
+# reportan pero NO bloquean el merge. Para activar el bloqueo: SECURITY_BLOCKING=true.
+#
+# Todas las Actions están fijadas por SHA completo (no por tag) y los binarios
+# se verifican con checksum, para evitar ataques como el de trivy-action (mar-2026).
+
+name: security-static
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  SEMGREP_VERSION: "1.178.0"
+  CHECKOV_VERSION: "3.3.21"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  TRIVY_VERSION: "0.75.0"
+  TRIVY_SHA256: "c6e65abddb348e25f10549df887045629cf28cc72453cd1c63acb717316b3f3f"
+  # SHAs del commit base/head del PR (o del merge queue). Vacíos si se llama fuera de un PR.
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+
+jobs:
+  semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: ${{ vars.SECURITY_BLOCKING != 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Instalar Semgrep
+        run: pipx install "semgrep==${SEMGREP_VERSION}"
+      - name: Escanear
+        run: |
+          # En PRs solo se reportan hallazgos NUEVOS respecto a la rama base,
+          # así los equipos no heredan el ruido de todo el código existente.
+          ARGS=""
+          if [ -n "$BASE_SHA" ]; then ARGS="--baseline-commit $BASE_SHA"; fi
+          semgrep scan --config p/default $ARGS \
+            --sarif-output=semgrep.sarif --error --metrics=off
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: semgrep-report
+          path: semgrep.sarif
+          if-no-files-found: ignore
+
+  gitleaks:
+    name: Secretos (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ vars.SECURITY_BLOCKING != 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Instalar Gitleaks (CLI, no requiere licencia)
+        run: |
+          F="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$F" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${F}"
+          echo "${GITLEAKS_SHA256}  ${F}" | sha256sum -c -
+          tar xzf "$F" gitleaks && sudo mv gitleaks /usr/local/bin/
+      - name: Escanear
+        run: |
+          # En PRs: solo los commits del PR. Fuera de un PR: todo el historial.
+          OPTS="--all"
+          if [ -n "$BASE_SHA" ]; then OPTS="${BASE_SHA}..${HEAD_SHA}"; fi
+          gitleaks git --log-opts="$OPTS" --redact \
+            --report-format sarif --report-path gitleaks.sarif --exit-code 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks.sarif
+          if-no-files-found: ignore
+
+  checkov:
+    name: IaC (Checkov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ vars.SECURITY_BLOCKING != 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Instalar Checkov
+        run: pipx install "checkov==${CHECKOV_VERSION}"
+      - name: Escanear
+        # Si el repo no tiene Terraform/CloudFormation/K8s/Dockerfile, termina sin hallazgos.
+        run: |
+          checkov -d . --quiet --compact \
+            -o cli -o sarif --output-file-path console,checkov-out
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: checkov-report
+          path: checkov-out/
+          if-no-files-found: ignore
+
+  trivy:
+    name: Dependencias (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: ${{ vars.SECURITY_BLOCKING != 'true' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Instalar Trivy (binario verificado, sin trivy-action)
+        run: |
+          F="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSfL -o "$F" "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${F}"
+          echo "${TRIVY_SHA256}  ${F}" | sha256sum -c -
+          tar xzf "$F" trivy && sudo mv trivy /usr/local/bin/
+      - name: Escanear dependencias (solo HIGH y CRITICAL)
+        run: |
+          trivy fs . --scanners vuln --severity HIGH,CRITICAL \
+            --format sarif --output trivy.sarif
+          # Segunda pasada (usa la caché) para mostrar la tabla en el log y fallar si hay hallazgos.
+          trivy fs . --scanners vuln --severity HIGH,CRITICAL \
+            --format table --exit-code 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: trivy-report
+          path: trivy.sarif
+          if-no-files-found: ignore
