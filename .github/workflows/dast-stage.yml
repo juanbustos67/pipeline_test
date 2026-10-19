@@ -1,0 +1,46 @@
+# DAST con OWASP ZAP (baseline = escaneo pasivo) contra el ambiente de stage.
+# Workflow reutilizable: cada repo de aplicación lo llama DESPUÉS de desplegar a stage.
+# El baseline no ataca activamente la aplicación ni necesita autenticación;
+# el full scan (activo) se recomienda programarlo aparte, en horario nocturno.
+
+name: security-dast-stage
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: "URL de la aplicación desplegada en stage"
+        required: true
+        type: string
+      rules_file:
+        description: "Ruta opcional a un .tsv de reglas ZAP (IGNORE/WARN/FAIL por regla) dentro del repo"
+        required: false
+        type: string
+        default: ""
+      blocking:
+        description: "true = falla el workflow si ZAP reporta alertas FAIL"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  zap-baseline:
+    name: DAST (ZAP baseline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: ${{ inputs.target_url }}
+          rules_file_name: ${{ inputs.rules_file }}
+          cmd_options: "-a"           # incluye reglas alfa pasivas
+          fail_action: ${{ inputs.blocking }}
+          allow_issue_writing: false  # el reporte va como artifact, no como issue
+          artifact_name: zap-baseline-report
