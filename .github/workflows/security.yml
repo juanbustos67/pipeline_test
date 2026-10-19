@@ -1,0 +1,15 @@
+# ALTERNATIVA si tu plan de GitHub no permite exigir workflows por ruleset:
+# copiar este archivo a cada repo. Llama al workflow central, así las reglas
+# se siguen manteniendo en un solo lugar.
+
+name: security
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    uses: ORG/security-pipelines/.github/workflows/security-static.yml@main
