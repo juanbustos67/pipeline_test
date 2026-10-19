@@ -1,0 +1,21 @@
+# PRUEBA de ZAP: se ejecuta a mano desde la pestaña Actions (botón "Run workflow").
+# Pide la URL al momento de ejecutarlo. Usa SOLO URLs que tengas autorización de escanear.
+
+name: zap-prueba
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "URL de stage a escanear (con https://)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dast:
+    uses: ./.github/workflows/security-dast-stage.yml
+    with:
+      target_url: ${{ inputs.url }}
